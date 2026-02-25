@@ -1153,6 +1153,7 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                     teikyou_status = "match"  # デフォルトは青
                     teikyou_span = None
                     try:
+                        teikyou_dt_span = None
                         # 提供の尺を取得（VOL列が「BL」または「TK」の場合、DT列から尺を取得）
                         if has_bl_or_tk:
                             # DT列から尺を取得
@@ -1167,6 +1168,7 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                             ]
                             dt_str = " ".join(w["text"] for w in dt_words)
                             teikyou_actual_sec = parse_duration_to_seconds(dt_str)
+                            teikyou_dt_span = (min(w["x0"] for w in dt_words) - 1, max(w["x1"] for w in dt_words) + 1) if dt_words else None
 
                         # フォーマット連絡表の提供尺を取得
                         print(f"[DEBUG_S2] teikyou_actual_sec取得後: teikyou_actual_sec={teikyou_actual_sec}", flush=True)
@@ -1233,6 +1235,7 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                         "status": teikyou_status,  # 提供尺の一致判定結果
                         "row_bbox": (row_top, row_bottom),
                         "s2_span": s2_span,
+                        "teikyou_dt_span": teikyou_dt_span,
                         "teikyou_span": teikyou_span,
                         "teikyou_name": matching_teikyou_name,
                         "teikyou_flag": bool(matching_teikyou_name),
@@ -1398,6 +1401,7 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                     
                     # 提供の尺を取得（VOL列が「BL」または「TK」の場合、DT列から尺を取得）
                     teikyou_actual_sec = None
+                    teikyou_dt_span = None
                     if has_bl_or_tk:
                         # DT列から尺を取得
                         dt_x0 = h_dt["x0"] - 10 if h_dt else 100
@@ -1411,6 +1415,7 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                         ]
                         dt_str = " ".join(w["text"] for w in dt_words)
                         teikyou_actual_sec = parse_duration_to_seconds(dt_str)
+                        teikyou_dt_span = (min(w["x0"] for w in dt_words) - 1, max(w["x1"] for w in dt_words) + 1) if dt_words else None
 
                     # フォーマット連絡表の提供尺を取得
                     teikyou_planned_sec = None
@@ -1470,6 +1475,7 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                         "status": teikyou_status,  # 提供尺の一致判定結果
                         "row_bbox": (row_top, row_bottom),
                         "d_span": d_span,  # D列のspan
+                        "teikyou_dt_span": teikyou_dt_span,
                         "teikyou_span": teikyou_span,
                         "teikyou_name": matching_teikyou_name,
                         "teikyou_flag": bool(matching_teikyou_name),
@@ -1731,7 +1737,7 @@ def make_overlay_pdf(
             else:
                 col_main = Color(unknown_rgb[0], unknown_rgb[1], unknown_rgb[2], alpha=alpha)
             col_tr = Color(s2_rgb[0], s2_rgb[1], s2_rgb[2], alpha=alpha)
-            for key in ("dt_span", "cm_span", "waku_span", "tr_span", "start_span", "s2_span", "d_span", "teikyou_span"):
+            for key in ("dt_span", "cm_span", "waku_span", "tr_span", "start_span", "s2_span", "d_span", "teikyou_span", "teikyou_dt_span"):
                 span = t.get(key)
                 if not span:
                     continue
@@ -1741,7 +1747,7 @@ def make_overlay_pdf(
                 # 提供列（s2_span, d_span, teikyou_span）は一致/不一致で色を変える
                 if key in ("tr_span", "start_span"):
                     c.setFillColor(col_tr)
-                elif key in ("s2_span", "d_span", "teikyou_span"):
+                elif key in ("s2_span", "d_span", "teikyou_span", "teikyou_dt_span"):
                     if t.get("status") == "mismatch":
                         c.setFillColor(Color(mismatch_rgb[0], mismatch_rgb[1], mismatch_rgb[2], alpha=alpha))
                     else:
