@@ -4,3 +4,4 @@ pypdf
 reportlab
 pandas
 chardet
+openpyxl
