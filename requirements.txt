@@ -1,0 +1,6 @@
+streamlit
+pdfplumber
+pypdf
+reportlab
+pandas
+chardet
