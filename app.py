@@ -464,21 +464,34 @@ def parse_format_excel_bytes(filename: str, raw: bytes) -> List[FormatProgram]:
                     teikyou_name = get_teikyou_name_near_cm(r, c)
                     if teikyou_name:
                         teikyou_names[cmno] = teikyou_name
-                        
-                        # 提供の尺を抽出（CM番号の2行上のセルから）
-                        # CM番号の位置から2行上、同じ列または近くの列を探す
-                        if r >= 2:
-                            # CM番号の2行上のセルを探す（同じ列または近くの列）
-                            for cc in range(max(0, c - 2), min(max_c, c + 3)):
-                                dur_cell = get_cell(r - 2, cc)
-                                if dur_cell and ('"' in dur_cell or '″' in dur_cell or '秒' in dur_cell):
-                                    # 時刻ではない（:が含まれない）
-                                    if ':' not in dur_cell:
-                                        teikyou_sec = parse_duration_to_seconds(dur_cell)
-                                        if teikyou_sec is not None:
-                                            teikyou_seconds[cmno] = teikyou_sec
-                                            break
 
+                        # 提供の尺を抽出
+                        # 実データ調査: 提供セルから2〜5行上・+1列（または同列）に秒数がある
+                        teikyou_cell_pos = None
+                        for rr in range(max(0, r - 6), r + 1):
+                            for cc in range(max(0, c - 3), min(max_c, c + 10)):
+                                vv = get_cell(rr, cc)
+                                if '提供' in vv and len(vv) < 12:
+                                    teikyou_cell_pos = (rr, cc)
+                                    break
+                            if teikyou_cell_pos:
+                                break
+
+                        if teikyou_cell_pos:
+                            tr, tc = teikyou_cell_pos
+                            found_sec = None
+                            for search_r in range(max(0, tr - 6), tr):
+                                for search_c in range(max(0, tc - 1), min(max_c, tc + 3)):
+                                    dur_cell = get_cell(search_r, search_c)
+                                    if dur_cell and ':' not in dur_cell:
+                                        sec = parse_duration_to_seconds(dur_cell)
+                                        if sec is not None:
+                                            found_sec = sec
+                                            break
+                                if found_sec is not None:
+                                    break
+                            if found_sec is not None:
+                                teikyou_seconds[cmno] = found_sec
         # すべての提供名を抽出（CM番号と関連付けなし含む）
         # 行ごとに「提供」または「サイド」を含むセルを探し、順番に追加
         for r in range(max_r):
@@ -1674,6 +1687,7 @@ def make_overlay_pdf(
     nf_rgb=(0.1, 0.3, 1.0),
     nf_font_size=12,
     s2_rgb=None,
+    teikyou_match_rgb=None,
 ):
     buf = io.BytesIO()
     c = canvas.Canvas(buf)
@@ -1723,9 +1737,15 @@ def make_overlay_pdf(
                     continue
                 x0, x1 = span
 
-                # TR列、S2列、D列、提供列は判定色ではなく指定色（青）固定
-                if key in ("tr_span", "start_span", "s2_span", "d_span", "teikyou_span"):
+                # TR列、S2列は指定色固定
+                # 提供列（s2_span, d_span, teikyou_span）は一致/不一致で色を変える
+                if key in ("tr_span", "start_span"):
                     c.setFillColor(col_tr)
+                elif key in ("s2_span", "d_span", "teikyou_span"):
+                    if t.get("status") == "mismatch":
+                        c.setFillColor(Color(mismatch_rgb[0], mismatch_rgb[1], mismatch_rgb[2], alpha=alpha))
+                    else:
+                        c.setFillColor(Color(teikyou_match_rgb[0], teikyou_match_rgb[1], teikyou_match_rgb[2], alpha=alpha))
                 else:
                     c.setFillColor(col_main)
 
@@ -1796,7 +1816,8 @@ def generate_marked_pdf(
     match_rgb=(0.1, 0.3, 1.0),
     nf_rgb=(0.1, 0.3, 1.0),
     nf_font_size=12,
-    s2_rgb=None
+    s2_rgb=None,
+    teikyou_match_rgb=None
 ) -> bytes:
     """
     マーキング済みPDFを生成する。
@@ -1807,8 +1828,9 @@ def generate_marked_pdf(
     if s2_targets is None:
         s2_targets = []
     if s2_rgb is None:
-        # デフォルトは一致（青）と同じ色
         s2_rgb = match_rgb
+    if teikyou_match_rgb is None:
+        teikyou_match_rgb = match_rgb
 
     reader = PdfReader(io.BytesIO(opelog_bytes))
 
@@ -1822,7 +1844,8 @@ def generate_marked_pdf(
         match_rgb=match_rgb,
         nf_rgb=nf_rgb,
         nf_font_size=nf_font_size,
-        s2_rgb=s2_rgb
+        s2_rgb=s2_rgb,
+        teikyou_match_rgb=teikyou_match_rgb
     )
 
     overlay_reader = PdfReader(overlay_buf)
@@ -1864,6 +1887,7 @@ st.caption("現在日付（JST）: 2025-12-22")
 with st.sidebar:
     st.header("設定")
     match_hex = st.color_picker("一致（青）の色", value="#1A4DFF")
+    teikyou_match_hex = st.color_picker("提供尺一致の色", value="#1A4DFF")
     nf_hex = st.color_picker("NF表示色（デフォルト青）", value="#1A4DFF")
     alpha = st.slider("マーカー透明度", min_value=0.05, max_value=0.40, value=0.20, step=0.01)
     nf_font_size = st.slider("NF文字サイズ", min_value=8, max_value=18, value=12, step=1)
@@ -1898,11 +1922,13 @@ if opelog_file and fmt_files:
 
 
         match_rgb = hex_to_rgb01(match_hex)
+        teikyou_match_rgb = hex_to_rgb01(teikyou_match_hex)
         nf_rgb = hex_to_rgb01(nf_hex)
 
         marked_pdf = generate_marked_pdf(
             opelog_bytes, targets, nf_labels,
-            alpha=alpha, match_rgb=match_rgb, nf_rgb=nf_rgb, nf_font_size=nf_font_size
+            alpha=alpha, match_rgb=match_rgb, nf_rgb=nf_rgb, nf_font_size=nf_font_size,
+            teikyou_match_rgb=teikyou_match_rgb
         )
         result_csv = build_result_csv(targets)
 
