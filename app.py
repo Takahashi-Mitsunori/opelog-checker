@@ -36,6 +36,31 @@ def _norm_token(t: str) -> str:
         t2 = t
     return (t2 or '').strip().upper()
 
+
+def _extract_teikyou_key(name: str) -> str:
+    """フォーマット連絡表の提供名からキー（アルファベット+プライム記号）を抽出。
+    
+    例:
+        '提供A'             -> 'A'
+        '提供B\''            -> "B'"
+        'サイドE\''          -> "E'"
+        'クッション CX=サイドB\'' -> "B'"
+        'CX=提供C'          -> 'C'
+    """
+    if not name:
+        return ""
+    n = unicodedata.normalize('NFKC', name)
+    # CX= (CＸ= 等) を除去してから抽出
+    n2 = re.sub(r'C[Xx]X?[=＝]', '', n, flags=re.IGNORECASE)
+    # 「提供」「サイド」の直後のアルファベット+記号を優先
+    m = re.search(r'(?:提供|サイド)([A-Z][\'′\'"″]*)', n2)
+    if m:
+        return m.group(1)
+    # なければ残った単独アルファベット+記号
+    m = re.search(r'[A-Z][\'′\'"″]*', n2)
+    return m.group(0) if m else ""
+
+
 S2_DEBUG_LOG: list[dict] = []
 
 def _extract_words_fallback(page):
@@ -1216,13 +1241,23 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                         if teikyou_words:
                             # 提供名の文字列全体を取得
                             teikyou_text = " ".join(w["text"] for w in teikyou_words)
-                            # アルファベット（A-Z、'付き）が含まれているか確認
-                            if re.search(r'[A-ZＡ-Ｚ][\'\'′]*', teikyou_text):
+                            # オペログから提供キー（アルファベット+記号）を抽出
+                            opelog_key = _extract_teikyou_key(teikyou_text)
+                            # フォーマット連絡表の提供名キーを抽出
+                            fmt_key = _extract_teikyou_key(matching_teikyou_name or "")
+                            if opelog_key:
                                 # 提供名の文字列全体をマーク
-                                teikyou_span = (min(w["x0"] for w in teikyou_words) - 1, 
+                                teikyou_span = (min(w["x0"] for w in teikyou_words) - 1,
                                                max(w["x1"] for w in teikyou_words) + 1)
-
-                                # 提供名がある場合は描画しない
+                                # フォーマット連絡表のキーと照合
+                                if fmt_key and opelog_key != fmt_key:
+                                    teikyou_status = "mismatch"
+                                    print(f"[DEBUG] S2行: 提供名不一致 opelog={opelog_key!r} fmt={fmt_key!r}")
+                                else:
+                                    # 一致または比較不能（フォーマット連絡表に提供名なし）→ 青
+                                    if teikyou_status != "mismatch":
+                                        teikyou_status = "match"
+                                # オペログに提供名がある場合は描画しない
                                 matching_teikyou_name = None
                     except Exception as e:
                         teikyou_status = "unknown"
@@ -1459,13 +1494,23 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                     if teikyou_words:
                         # 提供名の文字列全体を取得
                         teikyou_text = " ".join(w["text"] for w in teikyou_words)
-                        # アルファベット（A-Z、'付き）が含まれているか確認
-                        if re.search(r'[A-ZＡ-Ｚ][\'\'′]*', teikyou_text):
+                        # オペログから提供キー（アルファベット+記号）を抽出
+                        opelog_key = _extract_teikyou_key(teikyou_text)
+                        # フォーマット連絡表の提供名キーを抽出
+                        fmt_key = _extract_teikyou_key(matching_teikyou_name or "")
+                        if opelog_key:
                             # 提供名の文字列全体をマーク
-                            teikyou_span = (min(w["x0"] for w in teikyou_words) - 1, 
+                            teikyou_span = (min(w["x0"] for w in teikyou_words) - 1,
                                            max(w["x1"] for w in teikyou_words) + 1)
-                            
-                            # 提供名がある場合は描画しない
+                            # フォーマット連絡表のキーと照合
+                            if fmt_key and opelog_key != fmt_key:
+                                teikyou_status = "mismatch"
+                                print(f"[DEBUG] D行: 提供名不一致 opelog={opelog_key!r} fmt={fmt_key!r}")
+                            else:
+                                # 一致または比較不能（フォーマット連絡表に提供名なし）→ 青
+                                if teikyou_status != "mismatch":
+                                    teikyou_status = "match"
+                            # オペログに提供名がある場合は描画しない
                             matching_teikyou_name = None
                     
                     # D行（提供）をtargetsに追加
@@ -1767,29 +1812,12 @@ def make_overlay_pdf(
 
                 c.rect(x0, y0, x1 - x0, y1 - y0, fill=1, stroke=0)
 
-            # 提供名の描画（S2行またはD行（提供）で、teikyou_spanがない場合＝オペログに「提供」がない場合）
+            # 提供名の描画（S2行またはD行（提供）で、teikyou_spanがない場合＝オペログに提供名の記載がない場合）
+            # → フォーマット連絡表の文言をそのまま描画（クッション・サイド等の文言を含む）
             if t.get("kind") in ("s2", "d_teikyou") and t.get("teikyou_flag") and t.get("teikyou_name") and not t.get("teikyou_span"):
                 teikyou_name = t.get("teikyou_name")
-                
-                # 表示形式を調整
-                # 1. サイド提供の場合: 「サイドA」→「提供 サイドA」
-                # 2. 通常の提供の場合: 「提供A」→そのまま
-                # 3. クッション等の情報がある場合: 「クッション CX=サイドE'」→そのまま
-                # 4. CX=で始まる場合: 「CX=サイドB」→「クッション CX=サイドB」
-                has_cushion = 'クッション' in teikyou_name
-                # CX=の検出：「CX=」「CＸ=」「CX＝」「CＸ＝」のいずれかで始まっているか
-                starts_with_cx = (teikyou_name.startswith('CX=') or teikyou_name.startswith('CＸ=') or 
-                                 teikyou_name.startswith('CX＝') or teikyou_name.startswith('CＸ＝'))
-                
-                if starts_with_cx and not has_cushion:
-                    # CX=で始まる場合、クッションを追加
-                    display_name = f"クッション {teikyou_name}"
-                elif 'サイド' in teikyou_name and not has_cushion and not starts_with_cx:
-                    # 単純なサイド提供（例：「サイドA」）の場合
-                    display_name = f"提供 {teikyou_name}"
-                else:
-                    # その他の場合はそのまま表示
-                    display_name = teikyou_name
+                # フォーマット連絡表の文言をそのまま表示（変換・加工なし）
+                display_name = teikyou_name
                 
                 # スポンサー列の位置に提供名を描画（x=593付近、行の中央）
                 x_teikyou = 593
