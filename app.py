@@ -38,27 +38,45 @@ def _norm_token(t: str) -> str:
 
 
 def _extract_teikyou_key(name: str) -> str:
-    """フォーマット連絡表の提供名からキー（アルファベット+プライム記号）を抽出。
-    
+    """フォーマット連絡表またはオペログPDFの提供名からキー（アルファベット+プライム）を抽出。
+
+    プライム記号の正規化:
+        U+00B4 ACUTE ACCENT (´) → NKFCで U+0020+U+0301 に分解 → "B ́" → "B'"
+        U+0027 APOSTROPHE (') → そのまま
+        U+2019 RIGHT SINGLE QUOTATION MARK → "'"
+        U+2032 PRIME (′) → "'"
+    PDFスペース除去:
+        "提 供 A'" → "提供A'" → キー "A'"
     例:
-        '提供A'             -> 'A'
-        '提供B\''            -> "B'"
-        'サイドE\''          -> "E'"
+        '提供A'                  -> 'A'
+        '提供B\''                -> "B'"
+        '提供Ｂ´' (U+00B4)       -> "B'"
+        'サイドE\''              -> "E'"
         'クッション CX=サイドB\'' -> "B'"
-        'CX=提供C'          -> 'C'
+        '提 供 B\'' (PDFスペース) -> "B'"
+        'CX=提供C'               -> 'C'
     """
     if not name:
         return ""
     n = unicodedata.normalize('NFKC', name)
-    # CX= (CＸ= 等) を除去してから抽出
+    # U+0301 (COMBINING ACUTE ACCENT) → アポストロフィ '
+    # NFKC("Ｂ´") = "B " + U+0301  → "B'"
+    n = re.sub(r'\s*\u0301', "'", n)
+    # PDFでスペースが挿入される「提 供」「サ イ ド」を正規化
+    n = re.sub(r'提\s*供', '提供', n)
+    n = re.sub(r'サ\s*イ\s*ド', 'サイド', n)
+    # CX= (ＣＸ= 等) を除去
     n2 = re.sub(r'C[Xx]X?[=＝]', '', n, flags=re.IGNORECASE)
-    # 「提供」「サイド」の直後のアルファベット+記号を優先
-    m = re.search(r'(?:提供|サイド)([A-Z][\'′\'"″]*)', n2)
+    # プライム系文字を統一 → '
+    n2 = re.sub(r"[\u2019\u02bc\u2032\u00b4´′]", "'", n2)
+    # 「提供」「サイド」直後のアルファベット+プライムを優先
+    m = re.search(r'(?:提供|サイド)([A-Z][\']*)', n2)
     if m:
         return m.group(1)
-    # なければ残った単独アルファベット+記号
-    m = re.search(r'[A-Z][\'′\'"″]*', n2)
+    # 単独アルファベット+プライム
+    m = re.search(r"[A-Z][']*", n2)
     return m.group(0) if m else ""
+
 
 
 S2_DEBUG_LOG: list[dict] = []
@@ -410,35 +428,56 @@ def parse_format_excel_bytes(filename: str, raw: bytes) -> List[FormatProgram]:
             return False
 
         def has_teikyou_near_cm(r, c) -> bool:
-            # CMセル(r,c)の近傍に '提供' がある想定
+            # CMセル(r,c)の近傍に '提供' / 'サイド' / 'クッション' がある想定
             for rr in range(r - 4, r + 1):
                 for cc in range(c - 2, min(c + 10, max_c)):
                     v = get_cell(rr, cc)
-                    if '提供' in v:
+                    if '提供' in v or 'サイド' in v or 'クッション' in v:
                         return True
             return False
 
         def get_teikyou_name_near_cm(r, c) -> Optional[str]:
-            # CMセル(r,c)の近傍から提供名（例：「提供A」「提供Ｂ'」）または
-            # 「クッション CX=提供B」のような文字列を取得
-            
-            # パターン1: 提供名のみ（例：「提供A」）
-            # パターン2: 周辺情報を含む（例：「クッション」「CX=提供B」）
-            
+            # CMセル(r,c)の近傍から提供名を取得
+            # 対応パターン:
+            #   パターン1: 「提供A」「サイドA'」など（アルファベット付き）
+            #   パターン2: 「クッション」単独 → 同じ列の直下2行に「ＣＸ＝サイドB」等がある
+            #   パターン3: 「クッション ＣＸ＝サイドB」のように同一セルに含まれる場合
+
+            def _get_full_teikyou_name(rr, cc, v) -> Optional[str]:
+                """セル(rr,cc)の値vから完全な提供名を返す。
+                「クッション」単独の場合は直下2行のCX=...と結合する。"""
+                v = v.strip()
+                # クッション単独の場合
+                if v == 'クッション':
+                    for dr in [1, 2, 3]:
+                        if rr + dr < max_r:
+                            v2 = get_cell(rr + dr, cc).strip()
+                            if v2 and ('ＣＸ' in v2 or 'CX' in v2 or '提供' in v2 or 'サイド' in v2):
+                                return f"クッション {v2}"
+                    # CX=が見つからなくてもクッションとして返す
+                    return 'クッション'
+                # 提供/サイドを含む（そのまま返す）
+                if '提供' in v or 'サイド' in v or 'ＣＸ' in v or 'CX' in v:
+                    return v
+                return None
+
             # 同じ行を優先的に探索
             for cc in range(max(0, c - 5), min(max_c, c + 10)):
                 v = get_cell(r, cc)
-                # 提供を含むセル全体を取得
-                if '提供' in v:
-                    return v.strip()
-            
+                if '提供' in v or 'サイド' in v or 'クッション' in v:
+                    result = _get_full_teikyou_name(r, cc, v)
+                    if result:
+                        return result
+
             # 見つからなければ上下数行も探索
             for rr in range(r - 2, r + 3):
                 for cc in range(max(0, c - 5), min(max_c, c + 10)):
                     v = get_cell(rr, cc)
-                    if '提供' in v:
-                        return v.strip()
-            
+                    if '提供' in v or 'サイド' in v or 'クッション' in v:
+                        result = _get_full_teikyou_name(rr, cc, v)
+                        if result:
+                            return result
+
             # それでも見つからなければ、提供パターンのみ抽出
             for rr in range(r - 2, r + 3):
                 for cc in range(max(0, c - 5), min(max_c, c + 10)):
@@ -446,7 +485,7 @@ def parse_format_excel_bytes(filename: str, raw: bytes) -> List[FormatProgram]:
                     m = re.search(r'提供[A-ZＡ-Ｚ][\'\'′]*', v)
                     if m:
                         return m.group(0)
-            
+
             return None
 
         def find_duration_near(r, c) -> Optional[str]:
@@ -518,20 +557,30 @@ def parse_format_excel_bytes(filename: str, raw: bytes) -> List[FormatProgram]:
                             if found_sec is not None:
                                 teikyou_seconds[cmno] = found_sec
         # すべての提供名を抽出（CM番号と関連付けなし含む）
-        # 行ごとに「提供」または「サイド」を含むセルを探し、順番に追加
+        # 行ごとに「提供」「サイド」「クッション」を含むセルを探し、順番に追加
         for r in range(max_r):
             for c in range(max_c):
-                v = get_cell(r, c)
-                # 「提供」または「サイド」を含むセルを探す
-                if '提供' in v or 'サイド' in v:
-                    # 提供名のパターンを抽出
-                    # パターン1: 「提供A」「提供B'」など
-                    # パターン2: 「CX=提供B」など
-                    # パターン3: 「サイドA」「サイドB'」など
-                    # パターン4: 「CX=サイドB」など
-                    # セル全体を提供名として扱う
-                    teikyou_name = v.strip()
-                    if teikyou_name and teikyou_name not in all_teikyou_names:
+                v = get_cell(r, c).strip()
+                if not v:
+                    continue
+                # 「クッション」単独 → 直下2行のCX=...と結合
+                if v == 'クッション':
+                    teikyou_name = 'クッション'
+                    for dr in [1, 2, 3]:
+                        if r + dr < max_r:
+                            v2 = get_cell(r + dr, c).strip()
+                            if v2 and ('ＣＸ' in v2 or 'CX' in v2 or '提供' in v2 or 'サイド' in v2):
+                                teikyou_name = f"クッション {v2}"
+                                break
+                    if teikyou_name not in all_teikyou_names:
+                        all_teikyou_names.append(teikyou_name)
+                # 「提供」「サイド」「CX=...」を含む場合
+                elif '提供' in v or 'サイド' in v:
+                    # CX=...単独セルは上のクッションと結合済みなので無視
+                    if v.startswith('ＣＸ') or v.startswith('CX'):
+                        continue
+                    teikyou_name = v
+                    if teikyou_name not in all_teikyou_names:
                         all_teikyou_names.append(teikyou_name)
 
         return planned, q_flags, teikyou_flags, teikyou_names, all_teikyou_names, teikyou_seconds, s2_flags
