@@ -233,6 +233,7 @@ class FormatProgram:
     all_teikyou_names: List[str]          # すべての提供名（順番付き、CM番号と関連付けなし含む）
     teikyou_seconds: Dict[str, int]       # CMNo -> 提供の尺（秒）
     s2_flags: Dict[str, bool]            # CMNo -> True if format row has 独立した 'S2' セル
+    net_uke_seconds: List[int]           # ネット受け提供の尺（秒）リスト（出現順）
     source_name: str
 
 
@@ -309,7 +310,7 @@ def parse_format_csv_bytes(filename: str, raw: bytes) -> Optional[FormatProgram]
 
     if not (program and window and planned):
         return None
-    return FormatProgram(program=program, time_window=window, planned=planned, q_flags=q_flags, teikyou_flags=teikyou_flags, teikyou_names=teikyou_names, all_teikyou_names=[], teikyou_seconds={}, s2_flags=s2_flags, source_name=filename)
+    return FormatProgram(program=program, time_window=window, planned=planned, q_flags=q_flags, teikyou_flags=teikyou_flags, teikyou_names=teikyou_names, all_teikyou_names=[], teikyou_seconds={}, s2_flags=s2_flags, net_uke_seconds=[], source_name=filename)
 
 
 def parse_format_excel_bytes(filename: str, raw: bytes) -> List[FormatProgram]:
@@ -379,7 +380,7 @@ def parse_format_excel_bytes(filename: str, raw: bytes) -> List[FormatProgram]:
                             return (s, e)
         return None
 
-    def _extract_planned(df) -> Tuple[Dict[str, int], Dict[str, bool], Dict[str, bool], Dict[str, str], List[str], Dict[str, int], Dict[str, bool]]:
+    def _extract_planned(df) -> Tuple[Dict[str, int], Dict[str, bool], Dict[str, bool], Dict[str, str], List[str], Dict[str, int], Dict[str, bool], List[int]]:
         planned: Dict[str, int] = {}
         q_flags: Dict[str, bool] = {}
         teikyou_flags: Dict[str, bool] = {}
@@ -387,6 +388,7 @@ def parse_format_excel_bytes(filename: str, raw: bytes) -> List[FormatProgram]:
         all_teikyou_names: List[str] = []  # すべての提供名（順番付き）
         teikyou_seconds: Dict[str, int] = {}  # CMNo -> 提供の尺（秒）
         s2_flags: Dict[str, bool] = {}  # CMNo -> True if format row has 独立した 'S2' セル
+        net_uke_seconds: List[int] = []  # ネット受け提供の尺（秒）リスト（出現順）
 
         max_r, max_c = df.shape[0], df.shape[1]
 
@@ -583,13 +585,30 @@ def parse_format_excel_bytes(filename: str, raw: bytes) -> List[FormatProgram]:
                     if teikyou_name not in all_teikyou_names:
                         all_teikyou_names.append(teikyou_name)
 
-        return planned, q_flags, teikyou_flags, teikyou_names, all_teikyou_names, teikyou_seconds, s2_flags
+        # ネット受け提供の尺を抽出（「ネット受」セルと同じ列の上方向にある尺）
+        for r in range(max_r):
+            for c in range(max_c):
+                v = get_cell(r, c)
+                if 'ネット受' in v and v != 'ネット受け':
+                    # 同じ列・近傍列の上方向から尺を探す
+                    for search_r in range(r - 1, max(0, r - 8), -1):
+                        for dc in [-1, 0, 1, 2]:
+                            d = get_cell(search_r, c + dc)
+                            s = parse_duration_to_seconds(d) if d else None
+                            if s is not None:
+                                net_uke_seconds.append(s)
+                                break
+                        else:
+                            continue
+                        break
+
+        return planned, q_flags, teikyou_flags, teikyou_names, all_teikyou_names, teikyou_seconds, s2_flags, net_uke_seconds
 
     for sheet in xls.sheet_names:
         df = xls.parse(sheet_name=sheet, header=None, dtype=str).fillna("")
         program = _find_program_name(df)
         window = _find_time_window(df)
-        planned, q_flags, teikyou_flags, teikyou_names, all_teikyou_names, teikyou_seconds, s2_flags = _extract_planned(df)
+        planned, q_flags, teikyou_flags, teikyou_names, all_teikyou_names, teikyou_seconds, s2_flags, net_uke_seconds = _extract_planned(df)
 
         if program and window and planned:
             out.append(FormatProgram(
@@ -602,6 +621,7 @@ def parse_format_excel_bytes(filename: str, raw: bytes) -> List[FormatProgram]:
                 all_teikyou_names=all_teikyou_names,
                 teikyou_seconds=teikyou_seconds,
                 s2_flags=s2_flags,
+                net_uke_seconds=net_uke_seconds,
                 source_name=f"{filename}#{sheet}"
             ))
     return out
@@ -1397,6 +1417,108 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                                     "actual_sec": None,
                                 })
     
+                # --- BL行（ネット受け提供行）の処理 ---
+                # 条件: TR=D、DT列に数字あり、VOL=BL
+                # マーク対象: D/DT/BL と直下OFセル
+                # 尺チェック: フォーマット連絡表のnet_uke_secondsと照合 → 一致:青、不一致:赤
+                vol_x0_bl, vol_x1_bl = 140, 170  # VOL列の範囲（BLはx0=151.9）
+                d_bl_words = [w for w in words if w["text"] == "D"]
+                bl_net_idx = 0  # ネット受け提供の出現インデックス（フォーマット連絡表と対応）
+
+                for dw_bl in d_bl_words:
+                    y_pad = 3
+                    row_top_bl = dw_bl["top"] - y_pad
+                    row_bottom_bl = dw_bl["bottom"] + y_pad
+                    row_words_bl = [w for w in words if not (w["bottom"] < row_top_bl or w["top"] > row_bottom_bl)]
+
+                    # VOL列にBLがあるか確認
+                    vol_words_bl = [w for w in row_words_bl if vol_x0_bl <= w["x0"] <= vol_x1_bl]
+                    bl_word = next((w for w in vol_words_bl if w["text"] == "BL"), None)
+                    if bl_word is None:
+                        continue  # BLがなければスキップ
+
+                    # DT列に数字（尺）があるか確認
+                    dt_col_x0 = h_dt["x0"] - 10 if h_dt else 85
+                    dt_col_x1 = h_cmno["x0"] - 10 if h_cmno else 140
+                    dt_words_bl = [
+                        w for w in row_words_bl
+                        if dt_col_x0 <= w["x0"] <= dt_col_x1
+                        and ("'" in w["text"] or '"' in w["text"] or "″" in w["text"] or "’" in w["text"])
+                    ]
+                    if not dt_words_bl:
+                        continue  # DT列に数字がなければスキップ
+
+                    dt_str_bl = " ".join(w["text"] for w in dt_words_bl)
+                    actual_sec_bl = parse_duration_to_seconds(dt_str_bl)
+                    if actual_sec_bl is None:
+                        continue
+
+                    # フォーマット連絡表のネット受け尺と照合
+                    # 時刻から番組を特定
+                    tw_bl = _nearest_time_for_y(
+                        (dw_bl["top"] + dw_bl["bottom"]) / 2,
+                        dw_bl["top"], dw_bl["bottom"]
+                    )
+                    tsec_bl = parse_hhmmss(tw_bl["text"]) if tw_bl else None
+                    fmt_bl = None
+                    if tsec_bl is not None:
+                        for f in formats:
+                            s, e = f.time_window
+                            if s <= tsec_bl <= e:
+                                fmt_bl = f
+                                break
+
+                    planned_sec_bl = None
+                    bl_status = "match"  # デフォルト: 青
+                    if fmt_bl is not None and fmt_bl.net_uke_seconds:
+                        # 出現順でマッチング
+                        if bl_net_idx < len(fmt_bl.net_uke_seconds):
+                            planned_sec_bl = fmt_bl.net_uke_seconds[bl_net_idx]
+                        bl_net_idx += 1
+                        if planned_sec_bl is not None and actual_sec_bl != planned_sec_bl:
+                            bl_status = "mismatch"
+
+                    # D span
+                    d_span_bl = (dw_bl["x0"] - 1, dw_bl["x1"] + 1)
+                    # DT span
+                    dt_span_bl = (
+                        min(w["x0"] for w in dt_words_bl) - 1,
+                        max(w["x1"] for w in dt_words_bl) + 1
+                    ) if dt_words_bl else None
+                    # BL span
+                    bl_span = (bl_word["x0"] - 1, bl_word["x1"] + 1)
+
+                    # 直下OFを探す（50pt以内）
+                    of_span = None
+                    of_row_bbox = None
+                    of_words_nearby = [
+                        w for w in words
+                        if w["text"] == "OF"
+                        and vol_x0_bl <= w["x0"] <= vol_x1_bl
+                        and 0 < w["top"] - dw_bl["bottom"] < 60
+                    ]
+                    if of_words_nearby:
+                        ow = min(of_words_nearby, key=lambda w: w["top"])
+                        of_span = (ow["x0"] - 1, ow["x1"] + 1)
+                        of_row_bbox = (ow["top"] - y_pad, ow["bottom"] + y_pad)
+
+                    targets.append({
+                        "page": pi,
+                        "status": bl_status,
+                        "row_bbox": (row_top_bl, row_bottom_bl),
+                        "kind": "bl_net",
+                        "d_span_bl": d_span_bl,
+                        "dt_span_bl": dt_span_bl,
+                        "bl_span": bl_span,
+                        "of_span": of_span,
+                        "of_row_bbox": of_row_bbox,
+                        "program": fmt_bl.program if fmt_bl else "",
+                        "cmno": "",
+                        "planned_sec": planned_sec_bl,
+                        "actual_sec": actual_sec_bl,
+                    })
+                    print(f"[DEBUG] BL行: P{pi+1} top={dw_bl['top']:.1f} 尺={dt_str_bl} ({actual_sec_bl}秒) 予定={planned_sec_bl}秒 status={bl_status}", flush=True)
+
                 # --- D行（CM直後の提供行）の処理 ---
                 # TR列に「D」があり、スポンサー列に「提」または「サイド」がある行を抽出
                 # これらはCM直後の提供行で、直前のCMに対応する提供名を描画またはマーク
@@ -1702,7 +1824,7 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
         planned_map: Dict[Tuple[str, str], Optional[int]] = {}
         for t in targets:
             # S2行、D行、TR列が空の提供行、S2行の直後の行は除外
-            if t.get("kind") in ("s2", "d_teikyou", "teikyou_no_tr", "s2_next"):
+            if t.get("kind") in ("s2", "d_teikyou", "teikyou_no_tr", "s2_next", "bl_net"):
                 continue
             
             key = (t["program"], t["cmno"])
@@ -1720,7 +1842,7 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                 continue
             
             # S2行、D行、TR列が空の提供行、S2行の直後の行は提供尺チェック済みなので、色判定で上書きしない
-            if t.get("kind") in ("s2", "d_teikyou", "teikyou_no_tr", "s2_next"):
+            if t.get("kind") in ("s2", "d_teikyou", "teikyou_no_tr", "s2_next", "bl_net"):
                 t["actual_total_sec"] = t.get("actual_sec")
                 continue
     
@@ -1817,7 +1939,7 @@ def make_overlay_pdf(
 
         # NF番組以外はマークしない（※NF表示そのものは別処理）
         # ただし、kind="teikyou_no_tr"（TR列が空の提供行）は常にマークする
-        for t in [x for x in targets if x["page"] == pi and (x.get("program") in nf_programs or x.get("kind") == "teikyou_no_tr" or x.get("kind") == "s2_next")]:
+        for t in [x for x in targets if x["page"] == pi and (x.get("program") in nf_programs or x.get("kind") == "teikyou_no_tr" or x.get("kind") == "s2_next" or x.get("kind") == "bl_net")]:
             top, bottom = t["row_bbox"]
             y1 = h - top
             y0 = h - bottom
@@ -1831,6 +1953,28 @@ def make_overlay_pdf(
             else:
                 col_main = Color(unknown_rgb[0], unknown_rgb[1], unknown_rgb[2], alpha=alpha)
             col_tr = Color(s2_rgb[0], s2_rgb[1], s2_rgb[2], alpha=alpha)
+            # bl_net（ネット受け提供）専用の描画
+            if t.get("kind") == "bl_net":
+                bl_color = Color(teikyou_match_rgb[0], teikyou_match_rgb[1], teikyou_match_rgb[2], alpha=alpha) if t.get("status") != "mismatch" else Color(mismatch_rgb[0], mismatch_rgb[1], mismatch_rgb[2], alpha=alpha)
+                # D・DT・BLをまとめて同じ色でマーク
+                for bl_key in ("d_span_bl", "dt_span_bl", "bl_span"):
+                    span = t.get(bl_key)
+                    if span:
+                        x0, x1 = span
+                        c.setFillColor(bl_color)
+                        c.rect(x0, y0, x1 - x0, y1 - y0, fill=1, stroke=0)
+                # OFは同行ではなく別行なので別途描画
+                of_span = t.get("of_span")
+                of_row_bbox = t.get("of_row_bbox")
+                if of_span and of_row_bbox:
+                    of_top, of_bottom = of_row_bbox
+                    of_y1 = h - of_top
+                    of_y0 = h - of_bottom
+                    ox0, ox1 = of_span
+                    c.setFillColor(bl_color)
+                    c.rect(ox0, of_y0, ox1 - ox0, of_y1 - of_y0, fill=1, stroke=0)
+                continue  # bl_net は以下の汎用spanループをスキップ
+
             for key in ("dt_span", "cm_span", "waku_span", "tr_span", "start_span", "s2_span", "d_span", "teikyou_span", "teikyou_dt_span"):
                 span = t.get(key)
                 if not span:
