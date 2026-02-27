@@ -1691,28 +1691,29 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                             if '）' in w["text"] or ')' in w["text"]:
                                 break
                     
+                    # teikyou_wordsに「提供X」「サイドX」形式の提供名があるか確認
+                    # 単独の「提」（C/提 列から拾ったもの）は無視する
+                    valid_teikyou_words = []
                     if teikyou_words:
+                        teikyou_text_check = " ".join(w["text"] for w in teikyou_words)
+                        # 「提供」または「サイド」＋英字が含まれているか確認
+                        if _extract_teikyou_key(teikyou_text_check):
+                            valid_teikyou_words = teikyou_words
+                            print(f"[DEBUG] D行: スポンサー列に提供名あり: {repr(teikyou_text_check)}")
+                        else:
+                            print(f"[DEBUG] D行: スポンサー列の「提」は単独のため無視: {repr(teikyou_text_check)}")
+                    
+                    if valid_teikyou_words:
                         # 提供名の文字列全体を取得
-                        teikyou_text = " ".join(w["text"] for w in teikyou_words)
-                        # オペログから提供キー（アルファベット+記号）を抽出
+                        teikyou_text = " ".join(w["text"] for w in valid_teikyou_words)
                         opelog_key = _extract_teikyou_key(teikyou_text)
                         
                         # フォーマット連絡表のall_teikyou_namesから出現順に対応する提供名を取得
-                        # ※D行の提供名はCM番号と独立しているため、出現順（all_teikyou_names）で照合する
-                        # 現在のD行が何番目の提供かを、targetsに追加済みのd_teikyouとs2の数から計算
-                        current_d_teikyou_count = sum(
-                            1 for t in targets
-                            if t.get("kind") in ("d_teikyou", "s2")
-                            and t.get("program") == (fmt_d.program if fmt_d else "")
-                            and not t.get("teikyou_span")  # 既にオペログ上に提供名があるものはカウント対象
-                        )
-                        # オペログ上に既記載の提供名がある行も含めてカウント
                         current_d_teikyou_count_all = sum(
                             1 for t in targets
                             if t.get("kind") in ("d_teikyou", "s2")
                             and t.get("program") == (fmt_d.program if fmt_d else "")
                         )
-                        
                         fmt_teikyou_name = None
                         if fmt_d and fmt_d.all_teikyou_names:
                             idx = current_d_teikyou_count_all
@@ -1723,19 +1724,14 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                         print(f"[DEBUG] D行: 提供名照合 opelog={repr(teikyou_text)} opelog_key={repr(opelog_key)} fmt[{current_d_teikyou_count_all}]={repr(fmt_teikyou_name)} fmt_key={repr(fmt_key)}")
                         
                         if opelog_key:
-                            # 提供名の文字列全体をマーク
-                            teikyou_span = (min(w["x0"] for w in teikyou_words) - 1,
-                                           max(w["x1"] for w in teikyou_words) + 1)
-                            # フォーマット連絡表の対応提供名のキーと照合
+                            teikyou_span = (min(w["x0"] for w in valid_teikyou_words) - 1,
+                                           max(w["x1"] for w in valid_teikyou_words) + 1)
                             if fmt_key and opelog_key != fmt_key:
                                 teikyou_status = "mismatch"
                                 print(f"[DEBUG] D行: 提供名不一致 opelog={opelog_key!r} fmt={fmt_key!r}")
                             else:
-                                # 一致または比較不能（フォーマット連絡表に提供名なし）→ 青
                                 if teikyou_status != "mismatch":
                                     teikyou_status = "match"
-                            # オペログに提供名がある場合、teikyou_nameは描画不要だが
-                            # スポンサー列への表示用にfmt_teikyou_nameを保持
                             matching_teikyou_name = fmt_teikyou_name  # スポンサー列表示用
                     
                     # D行（提供）をtargetsに追加
