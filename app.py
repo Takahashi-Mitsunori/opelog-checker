@@ -229,7 +229,8 @@ class FormatProgram:
     planned: Dict[str, int]               # CMNo -> planned seconds（合算後）
     q_flags: Dict[str, bool]              # CMNo -> True if format row has 'Q'
     teikyou_flags: Dict[str, bool]        # CMNo -> True if format row has '提供'（提供行はS2と対応）
-    teikyou_names: Dict[str, str]         # CMNo -> '提供A', '提供B'', etc.
+    teikyou_names: Dict[str, str]         # CMNo -> '提供A', '提供B'', etc.（S2行用）
+    left_teikyou_names: Dict[str, str]    # CMNo -> '提供C', '提供H', etc.（D行用・左端独立記載の提供名）
     all_teikyou_names: List[str]          # すべての提供名（順番付き、CM番号と関連付けなし含む）
     teikyou_seconds: Dict[str, int]       # CMNo -> 提供の尺（秒）
     s2_flags: Dict[str, bool]            # CMNo -> True if format row has 独立した 'S2' セル
@@ -310,7 +311,7 @@ def parse_format_csv_bytes(filename: str, raw: bytes) -> Optional[FormatProgram]
 
     if not (program and window and planned):
         return None
-    return FormatProgram(program=program, time_window=window, planned=planned, q_flags=q_flags, teikyou_flags=teikyou_flags, teikyou_names=teikyou_names, all_teikyou_names=[], teikyou_seconds={}, s2_flags=s2_flags, net_uke_seconds=[], source_name=filename)
+    return FormatProgram(program=program, time_window=window, planned=planned, q_flags=q_flags, teikyou_flags=teikyou_flags, teikyou_names=teikyou_names, left_teikyou_names={}, all_teikyou_names=[], teikyou_seconds={}, s2_flags=s2_flags, net_uke_seconds=[], source_name=filename)
 
 
 def parse_format_excel_bytes(filename: str, raw: bytes) -> List[FormatProgram]:
@@ -385,6 +386,7 @@ def parse_format_excel_bytes(filename: str, raw: bytes) -> List[FormatProgram]:
         q_flags: Dict[str, bool] = {}
         teikyou_flags: Dict[str, bool] = {}
         teikyou_names: Dict[str, str] = {}
+        left_teikyou_names: Dict[str, str] = {}  # 左端独立記載の提供名（D行用）: CMNo -> 提供名
         all_teikyou_names: List[str] = []  # すべての提供名（順番付き）
         teikyou_seconds: Dict[str, int] = {}  # CMNo -> 提供の尺（秒）
         s2_flags: Dict[str, bool] = {}  # CMNo -> True if format row has 独立した 'S2' セル
@@ -602,13 +604,33 @@ def parse_format_excel_bytes(filename: str, raw: bytes) -> List[FormatProgram]:
                             continue
                         break
 
-        return planned, q_flags, teikyou_flags, teikyou_names, all_teikyou_names, teikyou_seconds, s2_flags, net_uke_seconds
+        # 左端（col=0〜4）の独立した提供名を抽出（D行用）
+        # フォーマット連絡表でD行トリガー提供の提供名は、CM番号列の左端に単独記載される
+        # 例: 「提供Ｃ」(col=2) → 同行右の「ＣＭ００６」に紐付け
+        for r in range(max_r):
+            for c in range(min(5, max_c)):
+                v = get_cell(r, c).strip()
+                if not v:
+                    continue
+                if '提供' in v or 'サイド' in v:
+                    # 同行の右側からCM番号を探す
+                    for cc in range(c + 1, max_c):
+                        vv = get_cell(r, cc).strip()
+                        m = cm_pat.search(vv)
+                        if m:
+                            cmno = f"CM{m.group(1).zfill(3)}"
+                            if cmno not in left_teikyou_names:
+                                left_teikyou_names[cmno] = v
+                                print(f"[FORMAT] left_teikyou_names[{cmno}] = {repr(v)}")
+                            break
+
+        return planned, q_flags, teikyou_flags, teikyou_names, left_teikyou_names, all_teikyou_names, teikyou_seconds, s2_flags, net_uke_seconds
 
     for sheet in xls.sheet_names:
         df = xls.parse(sheet_name=sheet, header=None, dtype=str).fillna("")
         program = _find_program_name(df)
         window = _find_time_window(df)
-        planned, q_flags, teikyou_flags, teikyou_names, all_teikyou_names, teikyou_seconds, s2_flags, net_uke_seconds = _extract_planned(df)
+        planned, q_flags, teikyou_flags, teikyou_names, left_teikyou_names, all_teikyou_names, teikyou_seconds, s2_flags, net_uke_seconds = _extract_planned(df)
 
         if program and window and planned:
             out.append(FormatProgram(
@@ -618,6 +640,7 @@ def parse_format_excel_bytes(filename: str, raw: bytes) -> List[FormatProgram]:
                 q_flags=q_flags,
                 teikyou_flags=teikyou_flags,
                 teikyou_names=teikyou_names,
+                left_teikyou_names=left_teikyou_names,
                 all_teikyou_names=all_teikyou_names,
                 teikyou_seconds=teikyou_seconds,
                 s2_flags=s2_flags,
@@ -1668,7 +1691,16 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                         # オペログから提供キー（アルファベット+記号）を抽出
                         opelog_key = _extract_teikyou_key(teikyou_text)
                         # フォーマット連絡表の提供名キーを抽出
-                        fmt_key = _extract_teikyou_key(matching_teikyou_name or "")
+                        # D行は「左端独立記載の提供名（left_teikyou_names）」を参照する
+                        # S2行のteikyou_names（クッション CX=提供B'等）とは別物
+                        left_fmt_name = fmt_d.left_teikyou_names.get(matching_cm or "") if fmt_d else None
+                        if left_fmt_name:
+                            fmt_key = _extract_teikyou_key(left_fmt_name)
+                            print(f"[DEBUG] D行: left_teikyou_names[{matching_cm}]={repr(left_fmt_name)} → fmt_key={repr(fmt_key)}")
+                        else:
+                            # left_teikyou_namesにない場合はS2用のteikyou_namesをフォールバックとして使用
+                            fmt_key = _extract_teikyou_key(matching_teikyou_name or "")
+                            print(f"[DEBUG] D行: left_teikyou_namesなし CM={matching_cm} → fallback fmt_key={repr(fmt_key)}")
                         if opelog_key:
                             # 提供名の文字列全体をマーク
                             teikyou_span = (min(w["x0"] for w in teikyou_words) - 1,
