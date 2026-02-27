@@ -1447,12 +1447,15 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                                 })
     
                 # --- BL行（ネット受け提供行）の処理 ---
-                # 条件: TR=D、DT列に数字あり、VOL=BL
+                # 条件: TR=D、DT列に数字あり、VOL=BL、かつAS列にH1/QRX等のネット受け信号あり
+                # ※自局提供BL行（AS列が空またはCM1）は d_teikyou として別途処理する
                 # マーク対象: D/DT/BL と直下OFセル
                 # 尺チェック: フォーマット連絡表のnet_uke_secondsと照合 → 一致:青、不一致:赤
                 vol_x0_bl, vol_x1_bl = 140, 170  # VOL列の範囲（BLはx0=151.9）
                 d_bl_words = [w for w in words if w["text"] == "D"]
                 bl_net_idx = 0  # ネット受け提供の出現インデックス（フォーマット連絡表と対応）
+                # ネット受け信号の判定キーワード
+                NET_SIGNALS = {"H1", "H2", "QRX", "LN", "LA"}
 
                 for dw_bl in d_bl_words:
                     y_pad = 3
@@ -1465,6 +1468,14 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                     bl_word = next((w for w in vol_words_bl if w["text"] == "BL"), None)
                     if bl_word is None:
                         continue  # BLがなければスキップ
+
+                    # AS列（x0=230〜400）にネット受け信号（H1/QRX等）があるか確認
+                    # ない場合は自局提供BL行なので d_teikyou として処理（ここではスキップ）
+                    as_words_bl = [w for w in row_words_bl if 230 <= w["x0"] <= 400]
+                    has_net_signal = any(w["text"] in NET_SIGNALS for w in as_words_bl)
+                    if not has_net_signal:
+                        print(f"[DEBUG] bl_net skip（自局提供BL）: top={dw_bl['top']:.1f} as_words={[w['text'] for w in as_words_bl]}", flush=True)
+                        continue  # 自局提供BLはd_teikyouループで処理
 
                     # DT列に数字（尺）があるか確認
                     dt_col_x0 = h_dt["x0"] - 10 if h_dt else 85
@@ -1573,11 +1584,13 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                     row_words = [w for w in words if not (w["bottom"] < row_top or w["top"] > row_bottom)]
                     row_words_sorted = sorted(row_words, key=lambda x: x["x0"])
                     
-                    # スポンサー列に「提」または「サイド」があるか確認
-                    sponsor_words = [w for w in row_words_sorted if sponsor_x0_s2 <= w["x0"] <= sponsor_x1_s2]
-                    has_teikyou = any('提' in w["text"] or 'サイド' in w["text"] for w in sponsor_words)
+                    # VOL列（x0=150-220）に「BL」または「TK」があるか確認
+                    # ※C/提列の「提」ではなくVOL列のBLで提供Dトリガー行を判定する
+                    vol_check_words = [w for w in row_words_sorted if 150 <= w["x0"] <= 220]
+                    has_bl_vol = any(w["text"].startswith("BL") or w["text"].startswith("TK") for w in vol_check_words)
+                    print(f"[DEBUG] D行: has_bl_vol={has_bl_vol}, vol_words={[w['text'] for w in vol_check_words]}", flush=True)
                     
-                    if not has_teikyou:
+                    if not has_bl_vol:
                         continue
                     
                     # 開始時刻を取得
