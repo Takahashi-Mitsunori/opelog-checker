@@ -1293,22 +1293,9 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                             teikyou_actual_sec = parse_duration_to_seconds(dt_str)
                             teikyou_dt_span = (min(w["x0"] for w in dt_words) - 1, max(w["x1"] for w in dt_words) + 1) if dt_words else None
 
-                        # フォーマット連絡表の提供尺を取得
+                        # 提供尺チェックは廃止（teikyou_secondsの抽出精度が低いため）
+                        # 常に青マーク（teikyou_status = "match"のまま）
                         print(f"[DEBUG_S2] teikyou_actual_sec取得後: teikyou_actual_sec={teikyou_actual_sec}", flush=True)
-                        if matching_cm and fmt_s2 is not None:
-                            teikyou_planned_sec = fmt_s2.teikyou_seconds.get(matching_cm)
-
-                        # 提供尺の一致判定
-                        if teikyou_planned_sec is not None and teikyou_actual_sec is not None:
-                            if teikyou_planned_sec != teikyou_actual_sec:
-                                teikyou_status = "mismatch"  # 不一致なら赤
-                                print(f"[DEBUG] S2行: 番組「{fmt_s2.program}」, CM{matching_cm}, 尺不一致: 予定={teikyou_planned_sec}秒, 実際={teikyou_actual_sec}秒")
-                            else:
-                                print(f"[DEBUG] S2行: 番組「{fmt_s2.program}」, CM{matching_cm}, 尺一致: {teikyou_planned_sec}秒")
-                        elif teikyou_planned_sec is None and matching_cm:
-                            print(f"[DEBUG] S2行: 番組「{fmt_s2.program}」, CM{matching_cm}, フォーマット連絡表に提供尺なし")
-                        elif matching_cm is None:
-                            print(f"[DEBUG] S2行: 番組「{fmt_s2.program}」, CM(なし), フォーマット連絡表に提供尺なし")
 
                         print(f"[DEBUG_S2] teikyou_status判定後: status={teikyou_status}", flush=True)
 
@@ -1665,21 +1652,9 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                         teikyou_actual_sec = parse_duration_to_seconds(dt_str)
                         teikyou_dt_span = (min(w["x0"] for w in dt_words) - 1, max(w["x1"] for w in dt_words) + 1) if dt_words else None
 
-                    # フォーマット連絡表の提供尺を取得
+                    # 提供尺チェックは廃止（teikyou_secondsの抽出精度が低いため常に青マーク）
                     teikyou_planned_sec = None
-                    if matching_cm and fmt_d is not None:
-                        teikyou_planned_sec = fmt_d.teikyou_seconds.get(matching_cm)
-                    
-                    # 提供尺の一致判定
-                    teikyou_status = "match"  # デフォルトは青
-                    if teikyou_planned_sec is not None and teikyou_actual_sec is not None:
-                        if teikyou_planned_sec != teikyou_actual_sec:
-                            teikyou_status = "mismatch"  # 不一致なら赤
-                            print(f"[DEBUG] D行: 番組「{getattr(fmt_d, 'program', '')}」, CM{matching_cm}, 尺不一致: 予定={teikyou_planned_sec}秒, 実際={teikyou_actual_sec}秒")
-                        else:
-                            print(f"[DEBUG] D行: 番組「{getattr(fmt_d, 'program', '')}」, CM{matching_cm}, 尺一致: {teikyou_planned_sec}秒")
-                    elif teikyou_planned_sec is None and matching_cm:
-                        print(f"[DEBUG] D行: 番組「{getattr(fmt_d, 'program', '')}」, CM{matching_cm}, フォーマット連絡表に提供尺なし")
+                    teikyou_status = "match"  # 常に青
                     
                     # 提供名のspan（既に記載されている場合）またはNone（描画が必要）
                     teikyou_span = None
@@ -1881,11 +1856,10 @@ def extract_targets_and_nf(opelog_bytes: bytes, formats: List[FormatProgram]):
                 fmt_name = fmt.all_teikyou_names[i] if i < len(fmt.all_teikyou_names) else None
                 
                 if t.get("opelog_teikyou_found"):
-                    # オペログに既記載 → teikyou_nameはスポンサー列表示用（既に設定済みのfmt対応名を使う）
-                    # ただし未設定の場合はfmt_nameを使う
-                    if not t.get("teikyou_name") and fmt_name:
-                        t["teikyou_name"] = fmt_name
-                        t["teikyou_flag"] = True
+                    # オペログに既記載 → 上書き描画しない（teikyou_nameはNoneのまま）
+                    # ただしステータス照合用にfmt_nameは保持（描画はしない）
+                    t["teikyou_name"] = None  # 描画させない
+                    t["teikyou_flag"] = False
                 elif not t.get("teikyou_name") and not t.get("teikyou_span"):
                     # オペログに提供名なし → フォーマット連絡表から描画
                     if fmt_name:
